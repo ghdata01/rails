@@ -1,3 +1,7 @@
+# frozen_string_literal: true
+
+require "active_support/core_ext/enumerable"
+
 module ActiveRecord
   module Associations
     # Implements the details of eager loading of Active Record associations.
@@ -10,13 +14,13 @@ module ActiveRecord
     #   end
     #
     #   class Book < ActiveRecord::Base
-    #     # columns: title, sales
+    #     # columns: title, sales, author_id
     #   end
     #
     # When you load an author with all associated books Active Record will make
     # multiple queries like this:
     #
-    #   Author.includes(:books).where(:name => ['bell hooks', 'Homer').to_a
+    #   Author.includes(:books).where(name: ['bell hooks', 'Homer']).to_a
     #
     #   => SELECT `authors`.* FROM `authors` WHERE `name` IN ('bell hooks', 'Homer')
     #   => SELECT `books`.* FROM `books` WHERE `author_id` IN (2, 5)
@@ -37,22 +41,15 @@ module ActiveRecord
     #
     # This could result in many rows that contain redundant data and it performs poorly at scale
     # and is therefore only used when necessary.
-    #
     class Preloader #:nodoc:
       extend ActiveSupport::Autoload
 
       eager_autoload do
-        autoload :Association,           'active_record/associations/preloader/association'
-        autoload :SingularAssociation,   'active_record/associations/preloader/singular_association'
-        autoload :CollectionAssociation, 'active_record/associations/preloader/collection_association'
-        autoload :ThroughAssociation,    'active_record/associations/preloader/through_association'
-
-        autoload :HasMany,             'active_record/associations/preloader/has_many'
-        autoload :HasManyThrough,      'active_record/associations/preloader/has_many_through'
-        autoload :HasOne,              'active_record/associations/preloader/has_one'
-        autoload :HasOneThrough,       'active_record/associations/preloader/has_one_through'
-        autoload :BelongsTo,           'active_record/associations/preloader/belongs_to'
+        autoload :Association,        "active_record/associations/preloader/association"
+        autoload :ThroughAssociation, "active_record/associations/preloader/through_association"
       end
+
+      attr_reader :records, :associations, :scope, :associate_by_default, :polymorphic_parent
 
       # Eager loads the named associations for the given Active Record record(s).
       #
@@ -64,7 +61,7 @@ module ActiveRecord
       # == Parameters
       # +records+ is an array of ActiveRecord::Base. This array needs not be flat,
       # i.e. +records+ itself may also contain arrays of records. In any case,
-      # +preload_associations+ will preload the all associations records by
+      # +preload_associations+ will preload all associations records by
       # flattening +records+.
       #
       # +associations+ specifies one or more associations that you want to
@@ -88,116 +85,82 @@ module ActiveRecord
       #   [ :books, :author ]
       #   { author: :avatar }
       #   [ :books, { author: :avatar } ]
+      def initialize(associate_by_default: true, polymorphic_parent: false, **kwargs)
+        if kwargs.empty?
+          ActiveSupport::Deprecation.warn("Calling `Preloader#initialize` without arguments is deprecated and will be removed in Rails 7.0.")
+        else
+          @records = kwargs[:records]
+          @associations = kwargs[:associations]
+          @scope = kwargs[:scope]
+          @associate_by_default = associate_by_default
+          @polymorphic_parent = polymorphic_parent
+        end
+      end
 
-      NULL_RELATION = Struct.new(:values, :where_clause, :joins_values).new({}, Relation::WhereClause.empty, [])
+      def call
+        return [] if records.empty? || associations.nil?
+
+        build_preloaders
+      end
 
       def preload(records, associations, preload_scope = nil)
-        records       = Array.wrap(records).compact.uniq
-        associations  = Array.wrap(associations)
-        preload_scope = preload_scope || NULL_RELATION
+        ActiveSupport::Deprecation.warn("`preload` is deprecated and will be removed in Rails 7.0. Call `Preloader.new(kwargs).call` instead.")
 
-        if records.empty?
-          []
-        else
-          associations.flat_map { |association|
-            preloaders_on association, records, preload_scope
-          }
-        end
+        Preloader.new(records: records, associations: associations, scope: preload_scope).call
       end
 
       private
+        def build_preloaders
+          Array.wrap(associations).flat_map { |association|
+            Array(association).flat_map { |parent, child|
+              grouped_records(parent).flat_map do |reflection, reflection_records|
+                loaders = preloaders_for_reflection(reflection, reflection_records)
 
-      def preloaders_on(association, records, scope)
-        case association
-        when Hash
-          preloaders_for_hash(association, records, scope)
-        when Symbol
-          preloaders_for_one(association, records, scope)
-        when String
-          preloaders_for_one(association.to_sym, records, scope)
-        else
-          raise ArgumentError, "#{association.inspect} was not recognised for preload"
-        end
-      end
+                if child
+                  loaders.concat build_child_preloader(reflection, child, loaders)
+                end
 
-      def preloaders_for_hash(association, records, scope)
-        association.flat_map { |parent, child|
-          loaders = preloaders_for_one parent, records, scope
-
-          recs = loaders.flat_map(&:preloaded_records).uniq
-          loaders.concat Array.wrap(child).flat_map { |assoc|
-            preloaders_on assoc, recs, scope
+                loaders
+              end
+            }
           }
-          loaders
-        }
-      end
+        end
 
-      # Not all records have the same class, so group then preload group on the reflection
-      # itself so that if various subclass share the same association then we do not split
-      # them unnecessarily
-      #
-      # Additionally, polymorphic belongs_to associations can have multiple associated
-      # classes, depending on the polymorphic_type field. So we group by the classes as
-      # well.
-      def preloaders_for_one(association, records, scope)
-        grouped_records(association, records).flat_map do |reflection, klasses|
-          klasses.map do |rhs_klass, rs|
-            loader = preloader_for(reflection, rs, rhs_klass).new(rhs_klass, rs, reflection, scope)
-            loader.run self
-            loader
+        def build_child_preloader(reflection, child, loaders)
+          child_polymorphic_parent = reflection && reflection.options[:polymorphic]
+          preloaded_records = loaders.flat_map(&:preloaded_records).uniq
+
+          Preloader.new(records: preloaded_records, associations: child, scope: scope, associate_by_default: associate_by_default, polymorphic_parent: child_polymorphic_parent).call
+        end
+
+        def preloaders_for_reflection(reflection, reflection_records)
+          reflection_records.group_by { |record| record.association(reflection.name).klass }.map do |rhs_klass, rs|
+            preloader_for(reflection).new(rhs_klass, rs, reflection, scope, associate_by_default).run
           end
         end
-      end
 
-      def grouped_records(association, records)
-        h = {}
-        records.each do |record|
-          next unless record
-          assoc = record.association(association)
-          klasses = h[assoc.reflection] ||= {}
-          (klasses[assoc.klass] ||= []) << record
-        end
-        h
-      end
-
-      class AlreadyLoaded
-        attr_reader :owners, :reflection
-
-        def initialize(klass, owners, reflection, preload_scope)
-          @owners = owners
-          @reflection = reflection
+        def grouped_records(association)
+          h = {}
+          records.each do |record|
+            reflection = record.class._reflect_on_association(association)
+            next if polymorphic_parent && !reflection || !record.association(association).klass
+            (h[reflection] ||= []) << record
+          end
+          h
         end
 
-        def run(preloader); end
+        # Returns a class containing the logic needed to load preload the data
+        # and attach it to a relation. The class returned implements a `run` method
+        # that accepts a preloader.
+        def preloader_for(reflection)
+          reflection.check_preloadable!
 
-        def preloaded_records
-          owners.flat_map { |owner| owner.association(reflection.name).target }
+          if reflection.options[:through]
+            ThroughAssociation
+          else
+            Association
+          end
         end
-      end
-
-      class NullPreloader
-        def self.new(klass, owners, reflection, preload_scope); self; end
-        def self.run(preloader); end
-        def self.preloaded_records; []; end
-      end
-
-      def preloader_for(reflection, owners, rhs_klass)
-        return NullPreloader unless rhs_klass
-
-        if owners.first.association(reflection.name).loaded?
-          return AlreadyLoaded
-        end
-        reflection.check_preloadable!
-
-        case reflection.macro
-        when :has_many
-          reflection.options[:through] ? HasManyThrough : HasMany
-        when :has_one
-          reflection.options[:through] ? HasOneThrough : HasOne
-        when :belongs_to
-          BelongsTo
-        end
-      end
     end
   end
 end

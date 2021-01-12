@@ -1,4 +1,46 @@
+# frozen_string_literal: true
+
+require "delegate"
+
+module ActiveSupport
+  module Tryable #:nodoc:
+    def try(method_name = nil, *args, &b)
+      if method_name.nil? && block_given?
+        if b.arity == 0
+          instance_eval(&b)
+        else
+          yield self
+        end
+      elsif respond_to?(method_name)
+        public_send(method_name, *args, &b)
+      end
+    end
+    ruby2_keywords(:try) if respond_to?(:ruby2_keywords, true)
+
+    def try!(method_name = nil, *args, &b)
+      if method_name.nil? && block_given?
+        if b.arity == 0
+          instance_eval(&b)
+        else
+          yield self
+        end
+      else
+        public_send(method_name, *args, &b)
+      end
+    end
+    ruby2_keywords(:try!) if respond_to?(:ruby2_keywords, true)
+  end
+end
+
 class Object
+  include ActiveSupport::Tryable
+
+  ##
+  # :method: try
+  #
+  # :call-seq:
+  #   try(*a, &b)
+  #
   # Invokes the public method whose name goes as first argument just like
   # +public_send+ does, except that if the receiver does not respond to it the
   # call returns +nil+ rather than raising an exception.
@@ -56,30 +98,40 @@ class Object
   #
   # Please also note that +try+ is defined on +Object+. Therefore, it won't work
   # with instances of classes that do not have +Object+ among their ancestors,
-  # like direct subclasses of +BasicObject+. For example, using +try+ with
-  # +SimpleDelegator+ will delegate +try+ to the target instead of calling it on
-  # the delegator itself.
-  def try(*a, &b)
-    try!(*a, &b) if a.empty? || respond_to?(a.first)
-  end
+  # like direct subclasses of +BasicObject+.
 
-  # Same as #try, but raises a NoMethodError exception if the receiver is
+  ##
+  # :method: try!
+  #
+  # :call-seq:
+  #   try!(*a, &b)
+  #
+  # Same as #try, but raises a +NoMethodError+ exception if the receiver is
   # not +nil+ and does not implement the tried method.
   #
   #   "a".try!(:upcase) # => "A"
   #   nil.try!(:upcase) # => nil
-  #   123.try!(:upcase) # => NoMethodError: undefined method `upcase' for 123:Fixnum
-  def try!(*a, &b)
-    if a.empty? && block_given?
-      if b.arity.zero?
-        instance_eval(&b)
-      else
-        yield self
-      end
-    else
-      public_send(*a, &b)
-    end
-  end
+  #   123.try!(:upcase) # => NoMethodError: undefined method `upcase' for 123:Integer
+end
+
+class Delegator
+  include ActiveSupport::Tryable
+
+  ##
+  # :method: try
+  #
+  # :call-seq:
+  #   try(a*, &b)
+  #
+  # See Object#try
+
+  ##
+  # :method: try!
+  #
+  # :call-seq:
+  #   try!(a*, &b)
+  #
+  # See Object#try!
 end
 
 class NilClass
@@ -93,14 +145,14 @@ class NilClass
   #
   # With +try+
   #   @person.try(:children).try(:first).try(:name)
-  def try(*args)
+  def try(_method_name = nil, *)
     nil
   end
 
   # Calling +try!+ on +nil+ always returns +nil+.
   #
   #   nil.try!(:name) # => nil
-  def try!(*args)
+  def try!(_method_name = nil, *)
     nil
   end
 end

@@ -1,4 +1,6 @@
-require 'action_dispatch/journey/visitors'
+# frozen_string_literal: true
+
+require "action_dispatch/journey/visitors"
 
 module ActionDispatch
   module Journey # :nodoc:
@@ -14,15 +16,15 @@ module ActionDispatch
         end
 
         def each(&block)
-          Visitors::Each.new(block).accept(self)
+          Visitors::Each::INSTANCE.accept(self, block)
         end
 
         def to_s
-          Visitors::String.new.accept(self)
+          Visitors::String::INSTANCE.accept(self, "")
         end
 
         def to_dot
-          Visitors::Dot.new.accept(self)
+          Visitors::Dot::INSTANCE.accept(self)
         end
 
         def to_sym
@@ -30,7 +32,7 @@ module ActionDispatch
         end
 
         def name
-          left.tr '*:', ''
+          -left.tr("*:", "")
         end
 
         def type
@@ -39,10 +41,15 @@ module ActionDispatch
 
         def symbol?; false; end
         def literal?; false; end
+        def terminal?; false; end
+        def star?; false; end
+        def cat?; false; end
+        def group?; false; end
       end
 
       class Terminal < Node # :nodoc:
         alias :symbol :left
+        def terminal?; true; end
       end
 
       class Literal < Terminal # :nodoc:
@@ -58,28 +65,32 @@ module ActionDispatch
         def literal?; false; end
       end
 
-      %w{ Symbol Slash Dot }.each do |t|
-        class_eval <<-eoruby, __FILE__, __LINE__ + 1
-          class #{t} < Terminal;
-            def type; :#{t.upcase}; end
-          end
-        eoruby
+      class Slash < Terminal # :nodoc:
+        def type; :SLASH; end
+      end
+
+      class Dot < Terminal # :nodoc:
+        def type; :DOT; end
       end
 
       class Symbol < Terminal # :nodoc:
         attr_accessor :regexp
         alias :symbol :regexp
+        attr_reader :name
 
-        DEFAULT_EXP = /[^\.\/\?]+/
-        def initialize(left)
-          super
-          @regexp = DEFAULT_EXP
+        DEFAULT_EXP = /[^.\/?]+/
+        GREEDY_EXP = /(.+)/
+        def initialize(left, regexp = DEFAULT_EXP)
+          super(left)
+          @regexp = regexp
+          @name = -left.tr("*:", "")
         end
 
         def default_regexp?
           regexp == DEFAULT_EXP
         end
 
+        def type; :SYMBOL; end
         def symbol?; true; end
       end
 
@@ -89,13 +100,24 @@ module ActionDispatch
 
       class Group < Unary # :nodoc:
         def type; :GROUP; end
+        def group?; true; end
       end
 
       class Star < Unary # :nodoc:
+        attr_accessor :regexp
+
+        def initialize(left)
+          super(left)
+
+          # By default wildcard routes are non-greedy and must match something.
+          @regexp = /.+?/
+        end
+
+        def star?; true; end
         def type; :STAR; end
 
         def name
-          left.name.tr '*:', ''
+          left.name.tr "*:", ""
         end
       end
 
@@ -111,6 +133,7 @@ module ActionDispatch
       end
 
       class Cat < Binary # :nodoc:
+        def cat?; true; end
         def type; :CAT; end
       end
 

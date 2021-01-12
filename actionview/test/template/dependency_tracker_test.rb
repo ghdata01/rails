@@ -1,6 +1,7 @@
+# frozen_string_literal: true
 
-require 'abstract_unit'
-require 'action_view/dependency_tracker'
+require "abstract_unit"
+require "action_view/dependency_tracker"
 
 class NeckbeardTracker
   def self.call(name, template)
@@ -16,8 +17,8 @@ class FakeTemplate
   end
 end
 
-Neckbeard = lambda {|template| template.source }
-Bowtie = lambda {|template| template.source }
+Neckbeard = lambda { |template, source| source }
+Bowtie = lambda { |template, source| source }
 
 class DependencyTrackerTest < ActionView::TestCase
   def tracker
@@ -190,5 +191,15 @@ class ERBTrackerTest < Minitest::Test
       "events/event",
       "comments/comment"
     ], tracker.dependencies
+  end
+
+  def test_dependencies_with_interpolation
+    template = FakeTemplate.new(%q{
+      <%# render "double/#{quote}" %>
+      <%# render 'single/#{quote}' %>
+    }, :erb)
+    tracker = make_tracker("interpolation/_string", template)
+
+    assert_equal ["single/\#{quote}"], tracker.dependencies
   end
 end
